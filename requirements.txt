@@ -1,0 +1,26 @@
+# Strava 自动化 —— 实际依赖
+#
+# ★★ 必须用官方【完整版】Python, 不能用 embeddable(便携版) ★★
+#    界面是 tkinter 写的, 而 embeddable 包里没有 tkinter
+#    (整个 zip 只有 34 个文件, 没有 _tkinter.pyd / tcl86t.dll / tkinter 包),
+#    用它的话界面 100% 打不开:
+#        ModuleNotFoundError: No module named 'tkinter'
+#    同事电脑上没有 Python 时, 启动.bat 会用完整版安装器装一个:
+#        python-3.11.9-amd64.exe /quiet InstallAllUsers=0
+#            TargetDir=<包内 _python> Include_tcltk=1 Include_pip=1
+#            Include_launcher=0 PrependPath=0 AssociateFiles=0 ...
+#    InstallAllUsers=0 -> 不需要管理员权限, 也不碰系统 PATH / 文件关联。
+#
+# 不需要 DrissionPage: 脚本是用 Playwright 通过 CDP 连接指纹浏览器
+# 【已经开好的】浏览器, 全库没有任何 .launch() 调用, 所以也不需要下载
+# 浏览器内核(不需要执行 playwright install chromium, 省约 196 MB)。
+#
+# 安装:  pip install -r requirements.txt
+
+playwright>=1.40
+requests>=2.31
+numpy>=1.24
+pillow>=10.0
+
+# tkinter 不列在这里 —— 它是 Python 标准库的一部分, 不能 pip 安装,
+# 只能靠安装 Python 时带上 tcl/tk 组件。
