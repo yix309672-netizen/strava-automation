@@ -4502,6 +4502,12 @@ def fetch_lb_filtered(page, seg_id, age, max_pages=None, gender=None,
               rows: (j.leaderboard||[]).map(x=>({name:x.displayName||'',
                                                  aid:x.athleteIdStr||String(x.athleteId||'')}))};
     }"""
+    # ★ 连续 429 计数(跨调用): 触发熔断后歇 5 分钟, 免越刷越封。成功一次就清零。
+    global _LB_429_STREAK
+    try:
+        _LB_429_STREAK = int(_LB_429_STREAK)
+    except Exception:
+        _LB_429_STREAK = 0
     rows, total = [], 0
     for pg in range(1, max_pages + 1):
         # ★ 429 退避(2026-10-02 真机: 榜单接口连吃 429, 不退就全 0):
@@ -4520,12 +4526,21 @@ def fetch_lb_filtered(page, seg_id, age, max_pages=None, gender=None,
                 res = None
                 break
             if res and res.get("ok"):
+                _LB_429_STREAK = 0
                 break
             _st = str((res or {}).get("status") or "")
+            if "429" in _st:
+                _LB_429_STREAK = int(_LB_429_STREAK or 0) + 1
+                if _LB_429_STREAK >= 8:
+                    log.warning("[lb] 连续 8 次 429, 限流未解: "
+                                "歇 5 分钟再继续(免越刷越封)")
+                    sleep_or_stop(300)
+                    _LB_429_STREAK = 0
+                    continue
             _slp = 20.0 if ("429" in _st) else 3.0
             log.info(f"[lb] {seg_id} {age} 第{pg}页 "
                      f"空/失败(ok={bool(res and res.get('ok'))} status={_st}) "
-                     f"-> {_slp:g} 秒后重试 {_try + 1}/2 次")
+                     f"-> {_slp:g} 秒后重试 {_try + 1}/3 次")
             sleep_or_stop(_slp)
             res = None
         if not res or not res.get("ok"):
