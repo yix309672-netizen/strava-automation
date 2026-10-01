@@ -4856,7 +4856,8 @@ def api_sample_region(page, region, age_groups, min_athletes, cap, stat=None):
     log.info(f"[region] {region} 搜索接口: 关键词={kw!r} 拿到 {len(ids)} 个路段"
              f"(免地图平移)")
     cands = {}
-    for sid in ids[:50]:
+    # ★ 探底最多探 25 个(省配额: 真正拉人走后面的采集循环, 排名用 25 个够了)
+    for sid in ids[:25]:
         check_stop()
         try:
             total, _rows = fetch_lb_filtered(page, sid, ages[0], max_pages=1)
