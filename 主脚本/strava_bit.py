@@ -4208,10 +4208,13 @@ def check_athlete(page, aid, max_followers=200, geo_filter=False,
     #   实测 Germany / Berlin / Hamburg / Frankfurt 就是这么被采进来的。
     #   形参保留只为让验证脚本能单独传值; 不传就是锁死的 True。
     #   (调用点 check_athlete(page, aid, ...) 不传这两个, 所以锁在这里一定生效。)
+    #   ★ 2026-10-02 用户放宽: 严格默认【关】——
+    #     真机榜单上的人几乎都不填所在地, 严格=九成以上直接淘汰, 采不满。
+    #     路段本身就在美国境内, 能上榜的大概率就是美国人, 认不出放行。
     if us_only is None:
         us_only = True
     if us_only_strict is None:
-        us_only_strict = True
+        us_only_strict = False
     _us_on = bool(us_only)
     _us_strict = bool(us_only_strict)
 
