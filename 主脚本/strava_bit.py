@@ -4504,15 +4504,30 @@ def fetch_lb_filtered(page, seg_id, age, max_pages=None, gender=None,
     }"""
     rows, total = [], 0
     for pg in range(1, max_pages + 1):
-        try:
-            rate_gate("api")      # ★ 风控闸门: 榜单接口 >=1.5s/次
-            _t_lb2 = net_ready()
-            res = page.evaluate(js, [seg_id, age, pg, _g, _dr])
-            net_elapsed(_t_lb2, "api")
-        except UserStopped:
-            raise
-        except Exception:
-            break
+        # ★ 429 退避(2026-10-02 真机: 榜单接口连吃 429, 不退就全 0):
+        #   空/失败最多给 3 次机会; 429 等 20 秒, 其它 3 秒。仍失败就收手(保已拿到页)。
+        res = None
+        for _try in range(3):
+            check_stop()
+            try:
+                rate_gate("api")      # ★ 风控闸门: 榜单接口 >=1.5s/次
+                _t_lb2 = net_ready()
+                res = page.evaluate(js, [seg_id, age, pg, _g, _dr])
+                net_elapsed(_t_lb2, "api")
+            except UserStopped:
+                raise
+            except Exception:
+                res = None
+                break
+            if res and res.get("ok"):
+                break
+            _st = str((res or {}).get("status") or "")
+            _slp = 20.0 if ("429" in _st) else 3.0
+            log.info(f"[lb] {seg_id} {age} 第{pg}页 "
+                     f"空/失败(ok={bool(res and res.get('ok'))} status={_st}) "
+                     f"-> {_slp:g} 秒后重试 {_try + 1}/2 次")
+            sleep_or_stop(_slp)
+            res = None
         if not res or not res.get("ok"):
             break
         total = res.get("total") or total
