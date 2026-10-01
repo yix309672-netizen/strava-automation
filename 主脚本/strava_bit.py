@@ -4740,6 +4740,111 @@ def close_extra_pages(page, tag=""):
     return closed
 
 
+_SEARCH_JS = r"""async (url) => {
+  const r = await fetch(url, {headers: {'x-requested-with': 'XMLHttpRequest'}});
+  const t = await r.text();
+  const ids = [...new Set([...t.matchAll(/\/segments\/(\d+)/g)].map(m => m[1]))];
+  return ids;
+}"""
+
+
+def _region_keywords(region):
+    """地区名 -> 路段搜索接口的 keywords(城市名)。
+
+    "Lakefront Trail (Chicago)" -> "Chicago";
+    "Los Angeles, California" -> "Los Angeles";
+    "New York" -> "New York"。
+    """
+    r = str(region or "").strip()
+    if " (" in r and r.endswith(")"):
+        city = r.rsplit(" (", 1)[1][:-1].strip()
+        if city:
+            return city
+    head = r.split(",")[0].strip()
+    return head or r
+
+
+def search_segment_ids(page, keywords, sports=("Run", "Ride"), pages=3):
+    """路段搜索接口: 直接拿某城市的路段 ID 列表(免地图截图/平移)。
+
+    2026-10-02 真机验证:
+      location 参数被忽略(所有城市返回同一份默认结果);
+      keywords 参数有效(Chicago/Los Angeles 返回各自不同的路段),
+      且翻页(page=2/3)给新的 ID。
+    返回: 按搜索顺序去重的 sid 列表(字符串)。
+    """
+    from urllib.parse import quote as _q
+    out = []
+    kw = str(keywords or "").strip()
+    if not kw:
+        return out
+    for sp in (sports or ()):
+        for pg in range(1, max(1, int(pages or 1)) + 1):
+            check_stop()
+            try:
+                rate_gate("api")
+            except Exception:
+                pass
+            url = ("https://www.strava.com/segments/search?keywords="
+                   + _q(kw) + "&filter_type=" + str(sp)
+                   + "&min-cat=0&max-cat=5&terrain=all&page=" + str(pg))
+            try:
+                ids = page.evaluate(_SEARCH_JS, url) or []
+            except UserStopped:
+                raise
+            except Exception:
+                break
+            new = [str(x) for x in ids if str(x) not in out]
+            out.extend(new)
+            if len(new) < 5:
+                break
+    return out
+
+
+def api_sample_region(page, region, age_groups, min_athletes, cap, stat=None):
+    """API 采样: 搜索接口拿 ID + 首个年龄组榜单探总数, 直接得到可排名的候选。
+
+    返回 {sid: 该组榜单 total}(过滤用), 失败/无结果返回 {}(调用方回落地图)。
+    探底只问第 1 页拿 total(不拉全页), 排名够用; 真正拉人还是走后面的采集循环。
+    """
+    kw = _region_keywords(region)
+    ages = [str(a) for a in (age_groups or []) if str(a).strip()]
+    if not kw or not ages:
+        return {}
+    try:
+        ids = search_segment_ids(page, kw)
+    except UserStopped:
+        raise
+    except Exception as e:
+        log.warning(f"[region] {region} 搜索接口异常({str(e)[:50]}), 回落地图")
+        return {}
+    if not ids:
+        return {}
+    log.info(f"[region] {region} 搜索接口: 关键词={kw!r} 拿到 {len(ids)} 个路段"
+             f"(免地图平移)")
+    cands = {}
+    for sid in ids[:50]:
+        check_stop()
+        try:
+            total, _rows = fetch_lb_filtered(page, sid, ages[0], max_pages=1)
+        except UserStopped:
+            raise
+        except Exception:
+            continue
+        try:
+            cands[str(sid)] = int(total or 0)
+        except Exception:
+            cands[str(sid)] = 0
+        if stat is not None:
+            try:
+                stat["seg_total"] = int(stat.get("seg_total") or 0) + 1
+            except Exception:
+                pass
+    log.info(f"[region] {region} 接口采样 {len(cands)} 个路段"
+             f"(已按{ages[0]}组人数探底)")
+    return cands
+
+
 def collect_regions(page, regions=None, age_groups=None,
                     min_athletes=None, max_followers=200, target_per_account=None,
                     max_segments_per_region=None, cli=None, geo_filter=None,
@@ -4992,6 +5097,21 @@ def collect_regions(page, regions=None, age_groups=None,
             if region_exempt:
                 log.info(f"[geo] {region}(纽约)豁免 {_hi_km:.0f}km 上限, "
                          f"仍要求 >{_lo_km:.0f}km")
+            # ★ API 优先(2026-10-02): 先问路段搜索接口拿本地区路段 ID 并探底,
+            #   命中就跳过地图缩放/平移(原来 10~20 分钟的盲扫); 空则走老地图路。
+            _api_seg_cands = {}
+            try:
+                _api_seg_cands = api_sample_region(
+                    page, region, age_groups, min_athletes, _seg_cap,
+                    stat=stat) or {}
+            except UserStopped:
+                raise
+            except Exception as _e:
+                log.warning(f"[region] {region} 接口采样失败, 回落地图")
+                _api_seg_cands = {}
+            if _api_seg_cands:
+                log.info(f"[region] {region} 接口已给 {len(_api_seg_cands)} 个候选, "
+                         f"跳过地图缩放/平移, 直接排名进采集")
             try:
                 log.info(f"[net] {net_info()}")
                 goto_retry(page, "https://www.strava.com/maps/global-heatmap/segments?sport=All&style=standard&terrain=false")
@@ -5082,7 +5202,8 @@ def collect_regions(page, regions=None, age_groups=None,
                     page.mouse.move(700, 400)
                     # ★ 真机实测: 放大过头标记会消失(11级后0个), 所以要"边放边数、停在最好的那一级, 变差就回退"
                     best_level, best_n, cur = 0, 0, 0
-                    for _z in range(ZOOM_MAX_STEPS):        # ZOOM_MAX_STEPS = 12
+                    # ★ 接口已命中时跳过缩放(路段 ID 已从搜索接口拿, 不用数标记定级)
+                    for _z in range(0 if _api_seg_cands else ZOOM_MAX_STEPS):        # ZOOM_MAX_STEPS = 12
                         check_stop()
                         page.mouse.wheel(0, -500)
                         sleep_or_stop(2.5)                  # ★ 原来太快: 瓦片没稳定就截图 -> 大面积超时
@@ -5131,7 +5252,8 @@ def collect_regions(page, regions=None, age_groups=None,
                 #   【未知】, 绝不能当成"零标记" —— 这是本引擎自己立的铁律
                 #   (find_markers 改成三态返回就是为了它)。把"未知"算进来, 会让连续
                 #   4 次截图故障直接触发下面的"停止采集", 白白中止一整轮采集。
-                if mk is not None and len(mk) == 0 and best_n <= 0:
+                if (not _api_seg_cands and mk is not None
+                        and len(mk) == 0 and best_n <= 0):
                     _dry += 1
                     log.warning(f"[region] {region} 零标记零路段, 跳过平移(连续空 {_dry} 个)")
                     if _dry >= 4:
@@ -5147,10 +5269,12 @@ def collect_regions(page, regions=None, age_groups=None,
                 #   也可能先抓了 4 个 5000 人的小路段就跑了。
                 #   现在分两步: ① 先【多采样】(只读达人数, 不当场定夺)
                 seg_ids, tried = [], set()
-                seg_cands = {}          # sid -> 该路段读到的运动达人数(多次读取最大)
+                # ★ 接口命中时这里已经是探底后的人数, 直接参与排名, 不再平移采样
+                seg_cands = dict(_api_seg_cands or {})
                 # ★ 平移轮数由常量 _pan_rounds 决定(2.11: 16 -> 8);
                 #   放大后视野变小, 但采样够 _enough 个会先一步喊停。
-                for rnd in range(_pan_rounds):
+                # ★ 接口已命中时跳过平移(候选已齐, 直接排名进采集)
+                for rnd in range(0 if _api_seg_cands else _pan_rounds):
                     check_stop()
                     if len(seg_cands) >= _seg_cap:
                         break
